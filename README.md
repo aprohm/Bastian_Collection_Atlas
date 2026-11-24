@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/35327426/README.md)
 # Bastian Collection Atlas
 
 An interactive atlas of Adolf Bastian's acquisitions for the Königliches Museum für Völkerkunde, Berlin (founded 1873, opened 1886). The objects and letters can be explored in seven view modes: Museum, Cabinet, Map, Globe, Web, Data and Atlas.

@@ -2195,14 +2195,17 @@ ii.readability=function(t,n){var e=ii(t),r=ii(n);return(Math.max(e.getLuminance(
    image, with the same markers, rings, drag, zoom and fly-to; the web is laid out by the same force simulation in 2D.
    ATLAS_WEBGL tells the views which to use; add #flat to the address to try the stand-ins in any browser. */
 const ATLAS_WEBGL=(()=>{
-  if(/[#&?]flat\b/.test(location.hash+location.search))return false;
-  try{const c=document.createElement('canvas');const g=c.getContext('webgl2')||c.getContext('webgl');if(!g)return false;
-    const lose=g.getExtension('WEBGL_lose_context');lose&&lose.loseContext();return true;}catch(e){return false;}
+  // why 3D is off, kept for the notice (and the console) so a reader can tell what their browser reported
+  window.ATLAS_GL_REASON='';
+  if(/[#&?]flat\b/.test(location.hash+location.search)){ATLAS_GL_REASON='flat view requested in the address';return false;}
+  try{const c=document.createElement('canvas');const g=c.getContext('webgl2')||c.getContext('webgl')||c.getContext('experimental-webgl');
+    if(!g){ATLAS_GL_REASON='the browser refused to create a WebGL context';return false;}
+    const lose=g.getExtension('WEBGL_lose_context');lose&&lose.loseContext();return true;}catch(e){ATLAS_GL_REASON='WebGL error: '+e.message;return false;}
 })();
 function flatNotice(el,what){
   if(el.querySelector('.flat-note'))return;
   const n=document.createElement('div');n.className='flat-note';
-  n.innerHTML=`<b>Flat view</b> · 3D graphics (WebGL) are unavailable in this browser, so the ${what} is drawn in 2D. `+
+  n.innerHTML=`<b>Flat view</b> · 3D graphics (WebGL) are unavailable in this browser${window.ATLAS_GL_REASON?` (${window.ATLAS_GL_REASON})`:''}, so the ${what} is drawn in 2D. `+
     `In Chrome, switch on <i>Settings › System › Use graphics acceleration when available</i> and restart Chrome for the 3D view.`+
     `<button type="button" aria-label="Dismiss">×</button>`;
   n.querySelector('button').onclick=e=>{e.stopPropagation();n.remove();};
@@ -2233,33 +2236,78 @@ function Globe2D(){
     function unproject(sx,sy){const f=F(),u=(sx-W/2)/f,v=-(sy-H/2)/f,Dc=1+alt,a=u*u+v*v+1,disc=4*Dc*Dc-4*a*(Dc*Dc-1);if(disc<0)return null;
       const t=(2*Dc-Math.sqrt(disc))/(2*a),x=t*u,y=t*v,z=Dc-t,p0=lat*D2R,ye=y*Math.cos(p0)+z*Math.sin(p0),ze=-y*Math.sin(p0)+z*Math.cos(p0);
       return {lat:Math.asin(Math.max(-1,Math.min(1,ye)))/D2R,lng:((lng+Math.atan2(x,ze)/D2R+540)%360)-180};}
-    // drawing: the textured sphere is redrawn when the view changes, at lower resolution while it moves
-    let dirty=true,moving=0,img=null,raf=0;
-    function drawBase(scale){
-      const w=Math.max(2,Math.round(W*scale)),h=Math.max(2,Math.round(H*scale));
-      if(base.width!==w||base.height!==h){base.width=w;base.height=h;img=null;}
+    // drawing. While the view moves, the sphere is redrawn quickly at low resolution; once it rests, it is redrawn at
+    // full screen resolution with smooth (bilinear) sampling, a few rows per frame so the page stays responsive.
+    // Zoomed in beyond the world image, the same close-up imagery tiles the 3D globe and the Map use are drawn in.
+    let dirty=true,moving=0,raf=0,job=null,tileUrl=null,tileMax=18,tileFail=0;
+    const tiles=new Map(),want=new Set();let loading=0;
+    function tileGet(z,x,y){const k=z+'/'+x+'/'+y;const t=tiles.get(k);if(t)return t.d;if(tileUrl&&tileFail<12)want.add(k);return null;}
+    function loadTiles(){
+      if(!tileUrl||tileFail>=12)return;
+      for(const k of want){if(loading>=12)break;if(tiles.has(k))continue;
+        const [z,x,y]=k.split('/').map(Number);tiles.set(k,{d:null});loading++;
+        const im=new Image();im.crossOrigin='anonymous';im.decoding='async';
+        im.onload=()=>{loading--;try{const c=document.createElement('canvas');c.width=c.height=256;const x2=c.getContext('2d',{willReadFrequently:true});x2.drawImage(im,0,0,256,256);
+          tiles.get(k).d=new Uint32Array(x2.getImageData(0,0,256,256).data.buffer);tileFail=0;}catch(e){tileFail++;}
+          if(tiles.size>900){let n=0;for(const kk of tiles.keys()){if(n++>300)break;tiles.delete(kk);}}
+          job=null;dirty=true;kick();};
+        im.onerror=()=>{loading--;tileFail++;};
+        im.src=tileUrl(x,y,z);}
+      want.clear();
+    }
+    function compose(w,h,img){
+      if(base.width!==w||base.height!==h){base.width=w;base.height=h;}
       bctx.clearRect(0,0,w,h);
-      const f=F()*scale,Dc=1+alt,rs=f/Math.sqrt(Dc*Dc-1),cx=w/2,cy=h/2;
+      const sc=w/W,f=F()*sc,Dc=1+alt,rs=f/Math.sqrt(Dc*Dc-1),cx=w/2,cy=h/2;
       if(showAtmo){const ro=rs*(1+atmoAlt*.9),g=bctx.createRadialGradient(cx,cy,rs*.99,cx,cy,ro);g.addColorStop(0,hexA(atmoCol,.32));g.addColorStop(.35,hexA(atmoCol,.12));g.addColorStop(1,hexA(atmoCol,0));
         bctx.fillStyle=g;bctx.beginPath();bctx.arc(cx,cy,ro,0,7);bctx.fill();}
-      if(!tex){bctx.fillStyle='#1d3b52';bctx.beginPath();bctx.arc(cx,cy,rs,0,7);bctx.fill();return;}
-      if(!img||img.width!==w||img.height!==h)img=bctx.createImageData(w,h);
-      const out=new Uint32Array(img.data.buffer);out.fill(0);
-      const p0=lat*D2R,sp=Math.sin(p0),cp=Math.cos(p0),k=Dc*Dc-1,lo0=lng;
-      const y0=Math.max(0,Math.floor(cy-rs)),y1=Math.min(h,Math.ceil(cy+rs)),x0=Math.max(0,Math.floor(cx-rs)),x1=Math.min(w,Math.ceil(cx+rs));
-      for(let py=y0;py<y1;py++){const v=-(py+.5-cy)/f;
-        for(let px=x0;px<x1;px++){const u=(px+.5-cx)/f,a=u*u+v*v+1,disc=Dc*Dc-a*k;if(disc<0)continue;
-          const t=(Dc-Math.sqrt(disc))/a,x=t*u,y=t*v,z=Dc-t,ye=y*cp+z*sp,ze=-y*sp+z*cp;
-          let lo=lo0+Math.atan2(x,ze)/D2R;lo=((lo+180)%360+360)%360;
-          const la=Math.asin(ye>1?1:ye<-1?-1:ye)/D2R;
-          let tx=(lo/360*TW)|0,ty=((90-la)/180*TH)|0;if(tx>=TW)tx=TW-1;if(ty>=TH)ty=TH-1;
-          // a soft limb darkening, as on the lit 3D globe
-          const c=tex[ty*TW+tx],sh=.72+.28*Math.min(1,(z-1/Dc)*Dc*1.6);
-          out[py*w+px]=(c&0xff000000)|(((c>>>16&255)*sh)<<16)|(((c>>>8&255)*sh)<<8)|((c&255)*sh);}}
-      // keep the atmosphere glow under the globe: compose the sphere over it
-      const tmp=drawBase.tmp||(drawBase.tmp=document.createElement('canvas'));tmp.width=w;tmp.height=h;tmp.getContext('2d').putImageData(img,0,0);
+      if(!img){bctx.fillStyle='#1d3b52';bctx.beginPath();bctx.arc(cx,cy,rs,0,7);bctx.fill();return;}
+      const tmp=compose.tmp||(compose.tmp=document.createElement('canvas'));tmp.width=w;tmp.height=h;tmp.getContext('2d').putImageData(img,0,0);
       bctx.drawImage(tmp,0,0);
     }
+    function startJob(scale,smooth){
+      const w=Math.max(2,Math.round(W*scale)),h=Math.max(2,Math.round(H*scale));
+      const f=F()*scale,Dc=1+alt,rs=f/Math.sqrt(Dc*Dc-1),cx=w/2,cy=h/2;
+      // which tile zoom suits the screen: about one tile pixel per screen pixel at the centre of the view
+      const ppd=f*D2R/Math.max(alt,.02),tz=Math.ceil(Math.log2(ppd*360/256));
+      // as on the 3D globe, once the imagery service answers, the surface is drawn from its tiles at every zoom
+      const useT=!!tileUrl&&tileFail<12;
+      return {w,h,f,Dc,rs,cx,cy,smooth,img:bctx.createImageData(w,h),row:Math.max(0,Math.floor(cy-rs)),y1:Math.min(h,Math.ceil(cy+rs)),
+        x0:Math.max(0,Math.floor(cx-rs)),x1:Math.min(w,Math.ceil(cx+rs)),tz:useT?Math.max(2,Math.min(tileMax,tz)):0,
+        p0:lat*D2R,lo0:lng};
+    }
+    function runJob(J,budget){
+      if(!tex)return true;
+      const out=new Uint32Array(J.img.data.buffer),t0=performance.now();
+      const {w,f,Dc,cx,cy,x0,x1,smooth,tz}=J,sp=Math.sin(J.p0),cp=Math.cos(J.p0),k=Dc*Dc-1,lo0=J.lo0,n=1<<tz,LN=Math.PI;
+      while(J.row<J.y1){const py=J.row++,v=-(py+.5-cy)/f;
+        for(let px=x0;px<x1;px++){const u=(px+.5-cx)/f,a=u*u+v*v+1,disc=Dc*Dc-a*k;if(disc<0)continue;
+          const t=(Dc-Math.sqrt(disc))/a,x=t*u,y=t*v,z=Dc-t,ye=y*cp+z*sp,ze=-y*sp+z*cp;
+          let lo=lo0+Math.atan2(x,ze)/D2R;lo=((lo+180)%360+360)%360;           // 0..360 from the antimeridian
+          const yc=ye>1?1:ye<-1?-1:ye,la=Math.asin(yc)/D2R;
+          let c=-1;
+          if(tz&&la<85&&la>-85){
+            // Web Mercator tile coordinates, falling back to coarser tiles until one is loaded
+            const mx=lo/360*n,my=(1-Math.log(Math.tan(Math.PI/4+la*D2R/2))/LN)/2*n;
+            for(let zz=tz,s2=1;zz>=Math.max(1,tz-4);zz--,s2*=2){const X=mx/s2,Y=my/s2,ix=X|0,iy=Y|0;const d=tileGet(zz,ix,iy);
+              if(d){c=d[(((Y-iy)*256)|0)*256+(((X-ix)*256)|0)];break;}}
+          }
+          if(c===-1){
+            if(smooth){let fx=lo/360*TW-.5,fy=(90-la)/180*TH-.5;if(fy<0)fy=0;if(fy>TH-1.001)fy=TH-1.001;
+              let ix=Math.floor(fx);const ax=fx-ix,iy=fy|0,ay=fy-iy;ix=(ix+TW)%TW;const ix2=(ix+1)%TW,r0=iy*TW,r1=r0+TW;
+              const c00=tex[r0+ix],c10=tex[r0+ix2],c01=tex[r1+ix],c11=tex[r1+ix2];
+              const m=(s3)=>((c00>>>s3&255)*(1-ax)+(c10>>>s3&255)*ax)*(1-ay)+((c01>>>s3&255)*(1-ax)+(c11>>>s3&255)*ax)*ay;
+              c=0xff000000|((m(16)|0)<<16)|((m(8)|0)<<8)|(m(0)|0);}
+            else{let tx=(lo/360*TW)|0,ty=((90-la)/180*TH)|0;if(tx>=TW)tx=TW-1;if(ty>=TH)ty=TH-1;c=tex[ty*TW+tx];}
+          }
+          // a soft limb darkening, as on the lit 3D globe
+          const sh=.72+.28*Math.min(1,(z-1/Dc)*Dc*1.6);
+          out[py*w+px]=0xff000000|((((c>>>16)&255)*sh)<<16)|((((c>>>8)&255)*sh)<<8)|((c&255)*sh);}
+        if(budget&&performance.now()-t0>budget)return false;}
+      return true;
+    }
+    const restScale=()=>Math.min(2,Math.max(1,devicePixelRatio||1));
+    const moveScale=()=>Math.min(.75,900/Math.max(W,H))*Math.min(1.5,devicePixelRatio||1);
     function hexA(h,a){const m=/^#?([0-9a-f]{6})$/i.exec(h);if(!m)return h;const n=parseInt(m[1],16);return `rgba(${n>>16&255},${n>>8&255},${n&255},${a})`;}
     function placeHtml(){
       html.forEach(d=>{const e=els.get(d);if(!e)return;const p=project(+acc.htmlLat(d),+acc.htmlLng(d),+acc.htmlAltitude(d)||0);
@@ -2285,12 +2333,15 @@ function Globe2D(){
       if(anim){const k=Math.min(1,(now-anim.t0)/anim.ms),e=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2;
         lat=anim.a.lat+(anim.b.lat-anim.a.lat)*e;lng=anim.a.lng+anim.dl*e;alt=anim.a.alt+(anim.b.alt-anim.a.alt)*e;
         if(k>=1)anim=null;dirty=true;moving=now;}
-      if(dirty){lng=((lng+540)%360)-180;drawBase(now-moving<160?Math.min(.5,600/Math.max(W,H)):Math.min(1.25,devicePixelRatio||1));placeHtml();
-        if(onZoomCb&&now-lastZoomEvt>40){lastZoomEvt=now;onZoomCb({lat,lng,altitude:alt});}
-        dirty=now-moving<160;}
+      let busy=false;
+      if(dirty){lng=((lng+540)%360)-180;placeHtml();
+        if(now-moving<180){job=null;const J=startJob(moveScale(),false);runJob(J,0);compose(J.w,J.h,tex?J.img:null);busy=true;}
+        else{dirty=false;job=startJob(restScale(),true);}
+        if(onZoomCb&&now-lastZoomEvt>40){lastZoomEvt=now;onZoomCb({lat,lng,altitude:alt});}}
+      if(job){if(runJob(job,12)){compose(job.w,job.h,tex?job.img:null);job=null;loadTiles();}else busy=true;}
       const live=drawFx(now);
-      if(dirty||anim||live)raf=requestAnimationFrame(frame);
-      else if(onZoomCb&&lastZoomEvt<moving)onZoomCb({lat,lng,altitude:alt});
+      if(dirty||busy||anim||live||job)raf=requestAnimationFrame(frame);
+      else if(onZoomCb&&lastZoomEvt<moving){lastZoomEvt=now;onZoomCb({lat,lng,altitude:alt});}
     }
     function kick(){if(!raf&&!paused)raf=requestAnimationFrame(frame);}
     function touch(){dirty=true;moving=performance.now();kick();}
@@ -2313,9 +2364,9 @@ function Globe2D(){
     const ctl={autoRotate:false,enableDamping:true,target:{x:0,y:0,z:0}};
     const api={};
     const chain=(name,f)=>{api[name]=function(...a){if(!a.length&&f.get)return f.get();f.set?f.set(...a):f(...a);return api;};};
-    chain('globeImageUrl',url=>{const im=new Image();im.onload=()=>{TW=Math.min(4096,im.naturalWidth);TH=Math.round(TW/2);const c=document.createElement('canvas');c.width=TW;c.height=TH;
+    chain('globeImageUrl',url=>{const im=new Image();im.onload=()=>{TW=Math.min((navigator.deviceMemory||8)>=8?8192:4096,im.naturalWidth);TH=Math.round(TW/2);const c=document.createElement('canvas');c.width=TW;c.height=TH;
       const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(im,0,0,TW,TH);tex=new Uint32Array(x.getImageData(0,0,TW,TH).data.buffer);touch();};im.src=url;});
-    chain('backgroundColor',v=>{bg=v;el.style.background=v;});
+    chain('backgroundColor',v=>{bg=v;if(!/^(transparent|rgba\([^)]*,\s*0\))$/.test(String(v).replace(/\s/g,'')))el.style.background=v;});   // transparent: the page's own black shows
     chain('showAtmosphere',v=>{showAtmo=!!v;});chain('atmosphereColor',v=>{atmoCol=v;});chain('atmosphereAltitude',v=>{atmoAlt=+v;});
     ['htmlLat','htmlLng','htmlAltitude','htmlElement'].forEach(k=>chain(k,v=>{acc[k]=fn(v);}));
     chain('htmlElementVisibilityModifier',v=>{acc.vis=v;});
@@ -2326,7 +2377,8 @@ function Globe2D(){
     chain('ringMaxRadius',v=>{acc.ringMaxRadius=v;});chain('ringPropagationSpeed',v=>{acc.ringSpeed=v;});chain('ringRepeatPeriod',v=>{acc.ringPeriod=v;});
     chain('onZoom',v=>{onZoomCb=v;});chain('onGlobeClick',v=>{onClickCb=v;});
     chain('width',{get:()=>W,set:v=>{W=+v||W;touch();}});chain('height',{get:()=>H,set:v=>{H=+v||H;touch();}});
-    ['showGraticules','htmlTransitionDuration','globeTileEngineUrl','globeTileEngineMaxLevel','animateIn','globeMaterial','enablePointerInteraction'].forEach(k=>chain(k,()=>{}));
+    chain('globeTileEngineUrl',v=>{tileUrl=typeof v==='function'?v:null;tiles.clear();touch();});chain('globeTileEngineMaxLevel',v=>{tileMax=+v||18;});
+    ['showGraticules','htmlTransitionDuration','animateIn','globeMaterial','enablePointerInteraction'].forEach(k=>chain(k,()=>{}));
     api.pointOfView=function(pov,ms){if(!pov)return {lat,lng,altitude:alt};
       const b={lat:pov.lat??lat,lng:pov.lng??lng,alt:pov.altitude??alt};
       if(!ms){anim=null;lat=b.lat;lng=b.lng;alt=b.alt;touch();return api;}
@@ -3626,7 +3678,7 @@ const alt=()=>0.002;
     if(G)return true;
     // 3D through globe.gl where the browser offers WebGL; otherwise the flat stand-in with the same interface
     let make=null;
-    if(ATLAS_WEBGL&&typeof Globe==='function')make=()=>Globe({animateIn:false})(el);
+    if(ATLAS_WEBGL&&!forceFlat&&typeof Globe==='function')make=()=>{const g=Globe({animateIn:false})(el);watchLoss(g);return g;};
     const flat=()=>{el.querySelectorAll('canvas,div:not(.flat-note)').forEach(n=>{if(n.parentNode===el)n.remove();});flatNotice(el,'globe');return Globe2D()(el);};
     let g0=null;try{g0=make?make():flat();}catch(e){console.warn('Globe: 3D failed, using the flat globe',e);g0=flat();}
     G=g0
@@ -3642,6 +3694,14 @@ const alt=()=>0.002;
     size();if(pendingVis)update(pendingVis);hires();
     return true;
   }
+  // if the browser takes the 3D context away (a driver reset, too many 3D pages open) and does not give it back,
+  // the globe is rebuilt in its flat form with the same view and markers
+  let forceFlat=false;
+  function watchLoss(g){try{const cv=g.renderer().domElement;let t=0;
+    cv.addEventListener('webglcontextlost',e=>{e.preventDefault();clearTimeout(t);t=setTimeout(()=>{
+      const pov=G&&G.pointOfView();window.ATLAS_GL_REASON='the 3D context was lost';forceFlat=true;try{G.pauseAnimation();}catch(_){}
+      el.querySelectorAll(':scope > *').forEach(n=>n.remove());G=null;init();if(pov)G.pointOfView(pov,0);size();if(pendingVis){stale=true;update(pendingVis);}},2500);});
+    cv.addEventListener('webglcontextrestored',()=>clearTimeout(t));}catch(e){}}
   function size(){if(G&&mode==='globe')G.width(el.clientWidth).height(el.clientHeight);}
   function update(vis){pendingVis=vis;if(!G)return;if(mode!=='globe'||!el.clientHeight){stale=true;return;}   // hidden: no size to cluster by, so wait until shown
     stale=false;groups=group(vis);G.htmlElementsData(groups);setNear();frameIfLost(vis);}
