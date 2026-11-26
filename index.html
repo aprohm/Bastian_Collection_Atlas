@@ -2085,7 +2085,7 @@ aside{gap:26px;padding-block:20px 28px}
         <input class="dv-find" id="dv-find" type="search" placeholder="Find in any column …" aria-label="Find in any column">
         <label class="dv-opt"><input type="checkbox" id="dv-sync" checked> Only records in the current search and filters</label>
         <span class="dv-count" id="dv-count" aria-live="polite"></span>
-        <span class="dv-ctas"><button class="dv-btn" id="dv-copy" title="Copies the rows shown as TSV (tab-separated values) to the clipboard: paste into Excel, Numbers, Google Sheets or a text editor">Copy as table (TSV)</button><button class="dv-btn" id="dv-api-btn" aria-expanded="false" aria-controls="dv-api">View API call</button></span>
+        <span class="dv-ctas"><button class="dv-btn" id="dv-copy" title="Saves the rows shown, with all columns, as a CSV file (comma-separated, UTF-8) in your downloads: opens in Excel, Numbers, Google Sheets, LibreOffice or a text editor">Save as CSV</button><button class="dv-btn" id="dv-api-btn" aria-expanded="false" aria-controls="dv-api">View API call</button></span>
       </div>
       <section class="dv-api" id="dv-api" hidden aria-label="API call behind the data">
         <div class="api-head">
@@ -3407,11 +3407,23 @@ const DT=(()=>{
     const tr=e.target.closest('tr');if(tr&&!getSelection().toString()){tr.classList.toggle('open');lastOpen=tr.classList.contains('open')?recOf.get(RAW.rows[+tr.dataset.i][iU]):null;}});
   let ft;find.addEventListener('input',()=>{clearTimeout(ft);ft=setTimeout(()=>{q=find.value.trim();draw();},200);});
   sync.addEventListener('change',draw);
-  document.getElementById('dv-copy').onclick=async e=>{
-    const tsv=[C.join('\t'),...rowsShown.map(i=>RAW.rows[i].map(v=>String(v).replace(/[\t\n\r]+/g,' ')).join('\t'))].join('\n');
-    try{await navigator.clipboard.writeText(tsv);e.target.textContent=`Copied ${fmt(rowsShown.length)} rows as TSV`;}
-    catch(_){e.target.textContent='Copy not allowed here';}
-    setTimeout(()=>e.target.textContent='Copy as table (TSV)',2200);};
+  // Save as CSV: the rows shown (search, filters and sort as on screen), every column, as a standard CSV file
+  // (RFC 4180: comma-separated, fields quoted where needed, quotes doubled, CRLF line ends) in UTF-8 with a byte-order
+  // mark so Excel reads the accents correctly. Line breaks inside a field are kept, inside its quotes.
+  const csvField=v=>{const t=v==null?'':String(v);return /[",\r\n]|^\s|\s$/.test(t)?'"'+t.replace(/"/g,'""')+'"':t;};
+  document.getElementById('dv-copy').onclick=e=>{
+    const btn=e.currentTarget,label='Save as CSV';
+    const lines=[C.map(csvField).join(','),...rowsShown.map(i=>RAW.rows[i].map(csvField).join(','))];
+    const blob=new Blob(['﻿'+lines.join('\r\n')+'\r\n'],{type:'text/csv;charset=utf-8'});
+    const d=new Date(),day=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const tag=q?'_'+q.normalize('NFKD').replace(/[̀-ͯ]/g,'').replace(/[^\w-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40):'';
+    const name=`bastian-collection-atlas_${day}${tag}_${rowsShown.length}-records.csv`;
+    const url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url;a.download=name;a.rel='noopener';a.style.display='none';document.body.appendChild(a);
+    try{a.click();btn.textContent=`Saved ${fmt(rowsShown.length)} rows as CSV`;}
+    catch(_){window.open(url,'_blank');btn.textContent='Opened the CSV in a new tab';}
+    setTimeout(()=>{a.remove();URL.revokeObjectURL(url);},4000);
+    setTimeout(()=>btn.textContent=label,2400);};
   function show(){view.hidden=false;if(!built){built=true;draw();}else if(sync.checked)draw();}
   function hide(){view.hidden=true;}
   function refilter(){if(!view.hidden&&sync.checked)draw();}
